@@ -46,10 +46,8 @@ ErrorOr<void> File::open_path(StringView filename, mode_t)
     // NOTE: Windows files have no POSIX permission bits, so the mode argument is ignored
     //       instead of being approximated.
 
-    if (has_flag(m_mode, OpenMode::Nonblocking)) {
-        dbgln("Core::File::OpenMode::Nonblocking is not implemented on Windows");
-        VERIFY_NOT_REACHED();
-    }
+    // NOTE: OpenMode::Nonblocking is accepted and ignored. On POSIX, O_NONBLOCK has no effect on regular files
+    //       and directories, and Windows has no equivalent for them, so opening with it must not be fatal.
 
     DWORD desired_access = 0;
     if (has_flag(m_mode, OpenMode::Read))
@@ -244,10 +242,28 @@ static struct stat stat_from_file_information(DWORD attributes, u64 file_size, F
     return st;
 }
 
-// FIXME: Unlike POSIX stat(), this doesn't follow symlinks (reparse points).
 ErrorOr<struct stat> File::stat(StringView path)
 {
     auto wide_path = TRY(to_wide_string(path));
+
+    // Like POSIX stat(), report on the target of a symlink (reparse point). CreateFileW follows reparse points
+    // unless told not to, so open the path without requesting any access and ask the handle.
+    HANDLE handle = CreateFileW(
+        wide_path.data(),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        auto result = fstat(to_fd(handle));
+        CloseHandle(handle);
+        return result;
+    }
+
+    // Some files cannot be opened even without access (e.g. system files held exclusively), but their attributes
+    // can still be queried, so fall back to that.
     WIN32_FILE_ATTRIBUTE_DATA attribute_data = {};
     if (!GetFileAttributesExW(wide_path.data(), GetFileExInfoStandard, &attribute_data))
         return open_error_from_windows_error();

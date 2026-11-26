@@ -104,3 +104,14 @@ TEST_CASE(relative_paths_are_refused)
 {
     expect_refused("file.txt"sv);
 }
+
+TEST_CASE(nonblocking_open_of_a_regular_file_is_accepted)
+{
+    // O_NONBLOCK does nothing for regular files on POSIX, so opening one with it must work on every platform.
+    CanonicalDirectory directory;
+    auto path = directory.write_file("nonblocking.txt"sv, "hello"sv);
+
+    auto file = MUST(Core::File::open(path, Core::File::OpenMode::Read | Core::File::OpenMode::Nonblocking));
+    auto contents = MUST(file->read_until_eof());
+    EXPECT_EQ(StringView { contents.bytes() }, "hello"sv);
+}

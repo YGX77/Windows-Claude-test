@@ -48,9 +48,6 @@ static ErrorOr<HANDLE> duplicate_inheritable_handle(HANDLE handle)
 
 ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
 {
-    // FIXME: Pass a custom environment to CreateProcess.
-    VERIFY(!options.environment.has_value());
-
     // The child inherits only the handles listed for it, as posix_spawn's file actions give a child only the
     // descriptors they name, so a handle passed to one child never reaches another spawned meanwhile.
     Vector<HANDLE> inherited_handles;
@@ -151,6 +148,19 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
             return Error::from_windows_error();
     }
 
+    // A custom environment is a block of NAME=value strings, each NUL-terminated, ended by an extra NUL.
+    ByteBuffer environment_block;
+    if (options.environment.has_value()) {
+        for (auto const& entry : *options.environment) {
+            TRY(environment_block.try_append(entry.bytes()));
+            TRY(environment_block.try_append('\0'));
+        }
+        // An empty environment still needs the terminating pair of NULs.
+        if (options.environment->is_empty())
+            TRY(environment_block.try_append('\0'));
+        TRY(environment_block.try_append('\0'));
+    }
+
     PROCESS_INFORMATION process_info = {};
 
     BOOL result = CreateProcessA(
@@ -160,7 +170,7 @@ ErrorOr<Process> Process::spawn(ProcessSpawnOptions const& options)
         NULL, // primary thread security attributes
         !inherited_handles.is_empty(),
         EXTENDED_STARTUPINFO_PRESENT | (options.new_process_group ? CREATE_NEW_PROCESS_GROUP : 0),
-        NULL, // use parent's environment
+        options.environment.has_value() ? environment_block.data() : NULL, // NULL uses the parent's environment
         NULL, // working directory
         &startup_info.StartupInfo,
         &process_info);

@@ -1,0 +1,86 @@
+name: Windows build
+
+# Builds the experimental native Windows (clang-cl) Ladybird on a GitHub-hosted runner and uploads the result.
+# Push a tag like v0.1.0 (or run the workflow by hand with "Publish a release" ticked) to attach it to a GitHub Release.
+
+on:
+  push:
+    branches: ['claude/**']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag to publish a GitHub Release under (leave empty to only upload a build artifact)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Windows, x86_64, Release, clang-cl
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          choco install -y pkgconfiglite ninja --no-progress
+          if ! where clang-cl > /dev/null 2>&1 ; then
+            choco install -y llvm --no-progress --version=20.1.8
+            echo "C:/Program Files/LLVM/bin" >> "${GITHUB_PATH}"
+            export PATH="/c/Program Files/LLVM/bin:${PATH}"
+          fi
+          clang-cl --version
+          rustup toolchain install
+          cargo --version
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset Release -B Build -DLADYBIRD_BASELINE_CPU_TARGET=ON
+
+      - name: Build
+        shell: pwsh
+        working-directory: Build
+        run: cmake --build .
+
+      - name: Install
+        shell: pwsh
+        working-directory: Build
+        run: cmake --install . --strip --prefix "${{ github.workspace }}/Install"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem -Recurse Install -Filter *.exe)) { throw "The build produced no .exe files" }
+          Compress-Archive -Path Install\* -DestinationPath Ladybird-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ladybird-windows-x64
+          path: Ladybird-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          files: Ladybird-windows-x64.zip
+          prerelease: true
+          body: Experimental native Windows (x86_64, clang-cl) build of Ladybird. Unzip and run `bin\ladybird.exe`.

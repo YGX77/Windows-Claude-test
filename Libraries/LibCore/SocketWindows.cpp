@@ -32,7 +32,7 @@ ErrorOr<Bytes> PosixSocketHelper::read(Bytes buffer, int flags)
     if (!is_open())
         return Error::from_errno(ENOTCONN);
 
-    // FIXME: also take into account if PosixSocketHelper is blocking/non-blocking (see set_blocking)
+    // NOTE: A socket put in non-blocking mode by set_blocking() reports WSAEWOULDBLOCK itself, which is handled below.
     bool non_blocking = flags & MSG_DONTWAIT;
 
     if (non_blocking && !TRY(can_read_without_blocking(0)))
@@ -72,8 +72,19 @@ ErrorOr<size_t> PosixSocketHelper::write(ReadonlyBytes buffer, int flags)
     if (!is_open())
         return Error::from_errno(ENOTCONN);
 
-    // FIXME: Implement non-blocking PosixSocketHelper::write
-    (void)flags;
+    if (flags & MSG_DONTWAIT) {
+        struct pollfd pollfd = {
+            .fd = static_cast<SOCKET>(m_fd),
+            .events = POLLOUT,
+            .revents = 0
+        };
+        auto poll_result = WSAPoll(&pollfd, 1, 0);
+        if (poll_result == SOCKET_ERROR)
+            return Error::from_windows_error();
+        if (poll_result == 0)
+            return Error::from_errno(EWOULDBLOCK);
+    }
+
     WSABUF buf = make_wsa_buf(buffer);
     DWORD nwritten = 0;
 
@@ -100,10 +111,16 @@ ErrorOr<bool> PosixSocketHelper::can_read_without_blocking(int timeout) const
     return result;
 }
 
-ErrorOr<void> PosixSocketHelper::set_blocking(bool)
+ErrorOr<void> PosixSocketHelper::set_blocking(bool enabled)
 {
-    // FIXME: Implement Core::PosixSocketHelper::set_blocking
-    // Currently does nothing, sockets are always blocking.
+    if (!is_open())
+        return Error::from_errno(ENOTCONN);
+
+    // FIONBIO takes a non-zero value to enable non-blocking mode. With it set, WSARecv/WSASend fail with
+    // WSAEWOULDBLOCK, which read() and write() already translate to EWOULDBLOCK.
+    u_long non_blocking = enabled ? 0 : 1;
+    if (ioctlsocket(static_cast<SOCKET>(m_fd), FIONBIO, &non_blocking) == SOCKET_ERROR)
+        return Error::from_windows_error();
     return {};
 }
 
@@ -384,8 +401,16 @@ ErrorOr<NonnullOwnPtr<TCPSocket>> TCPSocket::connect(ByteString const& host, u16
     // It should return an error instead of an empty vector.
     VERIFY(!ip_addresses.is_empty());
 
-    // FIXME: Support trying to connect to multiple IP addresses (e.g. if one of them doesn't seem to be working, try another one)
-    return ip_addresses.first().visit([port](auto address) { return connect(SocketAddress { address, port }); });
+    // Try each resolved address in turn and keep the first that connects, so one dead address
+    // (e.g. an unreachable IPv6 route) doesn't make the whole host unreachable.
+    Optional<Error> last_error;
+    for (auto const& ip_address : ip_addresses) {
+        auto socket_or_error = ip_address.visit([port](auto address) { return connect(SocketAddress { address, port }); });
+        if (!socket_or_error.is_error())
+            return socket_or_error.release_value();
+        last_error = socket_or_error.release_error();
+    }
+    return last_error.release_value();
 }
 
 ErrorOr<NonnullOwnPtr<TCPSocket>> TCPSocket::connect(SocketAddress const& address)
