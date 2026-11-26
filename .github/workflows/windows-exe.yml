@@ -5,7 +5,6 @@ name: Windows build
 
 on:
   push:
-    branches: ['claude/**']
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -21,7 +20,10 @@ permissions:
 jobs:
   build:
     name: Windows, x86_64, Release, clang-cl
-    runs-on: windows-2025
+    # NOTE: windows-2022 has Visual Studio 2022, whose C++ library works with the LLVM 20 clang-cl that
+    #       the upstream Windows CI is pinned to. windows-2025 now ships Visual Studio 18, whose library
+    #       needs Clang 22 or newer and fails the vcpkg dependency build with STL1000.
+    runs-on: windows-2022
     timeout-minutes: 360
 
     steps:
@@ -84,3 +86,13 @@ jobs:
           files: Ladybird-windows-x64.zip
           prerelease: true
           body: Experimental native Windows (x86_64, clang-cl) build of Ladybird. Unzip and run `bin\ladybird.exe`.
+
+      - name: Upload vcpkg logs on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-logs
+          path: |
+            Build/vcpkg-manifest-install.log
+            Build/vcpkg_installed/vcpkg/blds/**/*.log
+          if-no-files-found: ignore
