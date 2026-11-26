@@ -52,6 +52,16 @@ jobs:
           rustup toolchain install
           cargo --version
 
+      # Mirrors the "Install vcpkg" step of the upstream CI: clones and bootstraps the vcpkg revision pinned in
+      # vcpkg.json into Build/vcpkg-release. The overlay ports (nghttp2, curl) include that vcpkg's own ports, which
+      # the stripped-down vcpkg bundled with Visual Studio does not have. msvc-dev-cmd points VCPKG_ROOT at that
+      # bundled copy, so VCPKG_ROOT is overridden for the following steps.
+      - name: Install vcpkg
+        shell: bash
+        run: |
+          python Meta/ladybird.py vcpkg --preset Release
+          echo "VCPKG_ROOT=$(pwd -W)/Build/vcpkg-release" >> "${GITHUB_ENV}"
+
       - name: Configure
         shell: pwsh
         run: cmake --preset Release -B Build -DLADYBIRD_BASELINE_CPU_TARGET=ON
