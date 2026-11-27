@@ -1,7 +1,7 @@
 name: Windows build
 
 # Builds the experimental native Windows (clang-cl) Ladybird on a GitHub-hosted runner and uploads the result.
-# Push a tag like v0.1.0 (or run the workflow by hand with "Publish a release" ticked) to attach it to a GitHub Release.
+# Push a tag like v0.1.0, or run the workflow by hand with a release_tag, to attach the result to a GitHub Release.
 
 on:
   push:
@@ -13,6 +13,11 @@ on:
         required: false
         default: ''
         type: string
+      publish_anyway:
+        description: 'Publish the release even if the smoke test of Ladybird.exe fails'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -25,6 +30,10 @@ jobs:
     #       needs Clang 22 or newer and fails the vcpkg dependency build with STL1000.
     runs-on: windows-2022
     timeout-minutes: 360
+
+    env:
+      # Keeps the built dependencies (Qt, Skia, FFmpeg, ...) between runs, since building them takes about an hour.
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/Build/caches/vcpkg-binary-cache,readwrite
 
     steps:
       - uses: actions/checkout@v4
@@ -62,9 +71,30 @@ jobs:
           python Meta/ladybird.py vcpkg --preset Release
           echo "VCPKG_ROOT=$(pwd -W)/Build/vcpkg-release" >> "${GITHUB_ENV}"
 
+      - name: Prepare the vcpkg binary cache
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force Build\caches\vcpkg-binary-cache | Out-Null
+
+      - name: Restore the vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: Build/caches/vcpkg-binary-cache
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-
+            vcpkg-windows-
+
       - name: Configure
         shell: pwsh
         run: cmake --preset Release -B Build -DLADYBIRD_BASELINE_CPU_TARGET=ON
+
+      # Saved even if a later step fails, so a retry doesn't rebuild the dependencies.
+      - name: Save the vcpkg binary cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: Build/caches/vcpkg-binary-cache
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ github.run_id }}
 
       - name: Build
         shell: pwsh
@@ -84,6 +114,61 @@ jobs:
           if (-not $crt) { throw "Could not find the Visual C++ runtime DLLs under $env:VCToolsRedistDir" }
           Copy-Item "$($crt.FullName)\*.dll" Install\bin\
 
+      # On Windows the libraries that vcpkg builds (Qt, Skia, FFmpeg, ICU, OpenSSL, curl, ...) are not installed by
+      # "cmake --install", so Ladybird.exe fails to start with "Qt6Widgets.dll was not found" and similar errors.
+      - name: Bundle Qt and the other vcpkg DLLs
+        shell: pwsh
+        run: |
+          $vcpkgInstalled = "Build\vcpkg_installed\x64-windows"
+          if (-not (Test-Path "$vcpkgInstalled\bin")) { throw "vcpkg's DLL folder $vcpkgInstalled\bin does not exist" }
+          Copy-Item "$vcpkgInstalled\bin\*.dll" Install\bin\ -Force
+
+          # Qt needs its platform plugin (platforms\qwindows.dll) and the other plugins in folders next to the executable.
+          $qwindows = Get-ChildItem -Path $vcpkgInstalled -Recurse -Filter qwindows.dll | Select-Object -First 1
+          if (-not $qwindows) { throw "Could not find Qt's qwindows.dll platform plugin under $vcpkgInstalled" }
+          $pluginRoot = $qwindows.Directory.Parent.FullName
+          Write-Host "Copying the Qt plugins from $pluginRoot"
+          Get-ChildItem $pluginRoot -Directory | ForEach-Object {
+            Copy-Item $_.FullName "Install\bin\$($_.Name)" -Recurse -Force
+          }
+          Get-ChildItem Install\bin -Directory | ForEach-Object { Write-Host "  bin\$($_.Name)" }
+
+      # Fails the build if any program or library imports a DLL that is neither shipped nor part of Windows.
+      - name: Check that no DLL is missing
+        shell: pwsh
+        run: |
+          python -m pip install --quiet pefile
+          python .github/windows/check_dlls.py Install\bin
+
+      # Starts the real Ladybird.exe once. Not required to pass: a build machine may not allow a window to open.
+      - name: Smoke test Ladybird.exe
+        id: smoke
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $binDirectory = (Resolve-Path Install\bin).Path
+          $process = Start-Process -FilePath "$binDirectory\Ladybird.exe" -WorkingDirectory $binDirectory -PassThru
+          try {
+            if ($process.WaitForExit(30000)) {
+              Write-Host "Ladybird.exe quit by itself with exit code $($process.ExitCode) within 30 seconds"
+              exit 1
+            }
+            $process.Refresh()
+            $loaded = @($process.Modules | ForEach-Object { $_.ModuleName })
+            Write-Host "Ladybird.exe is still running after 30 seconds and has loaded $($loaded.Count) modules"
+            $required = 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'lagom-web.dll', 'lagom-webview.dll', 'qwindows.dll'
+            $notLoaded = @($required | Where-Object { $_ -notin $loaded })
+            Write-Host "Helper processes running from the install folder:"
+            Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($binDirectory) } |
+              ForEach-Object { Write-Host "  $($_.ProcessName) (pid $($_.Id))" }
+            if ($notLoaded.Count -gt 0) {
+              Write-Host "These modules were not loaded: $($notLoaded -join ', ')"
+              exit 1
+            }
+          } finally {
+            Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($binDirectory) } | Stop-Process -Force
+          }
+
       - name: Package
         shell: pwsh
         run: |
@@ -101,13 +186,17 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        if: >-
+          ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '')
+              && (steps.smoke.outcome == 'success' || inputs.publish_anyway == true) }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
           files: Ladybird-windows-x64.zip
           prerelease: true
-          body: Experimental native Windows (x86_64, clang-cl) build of Ladybird. Unzip and run `bin\ladybird.exe`.
+          body: >-
+            Experimental native Windows (x86_64, clang-cl) build of Ladybird. Run Ladybird-Setup.exe if it is attached
+            to this release, or unzip Ladybird-windows-x64.zip and run `bin\Ladybird.exe`.
 
       - name: Upload vcpkg logs on failure
         if: ${{ failure() }}
