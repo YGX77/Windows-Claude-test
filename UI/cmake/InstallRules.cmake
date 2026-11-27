@@ -7,6 +7,12 @@ set(package Ladybird)
 if (APPLE)
     set(ladybird_executable_install_dir bundle/Ladybird.app/Contents/MacOS)
     set(ladybird_helper_install_dir ${ladybird_executable_install_dir})
+elseif (WIN32)
+    # On Windows a helper process is found only next to the main executable (see get_paths_for_helper_process() in
+    # LibWebCommon/WebView/Utilities.cpp), and it loads the shared libraries installed in bin/. So the helpers cannot
+    # go in libexec/ as on other platforms.
+    set(ladybird_executable_install_dir ${CMAKE_INSTALL_BINDIR})
+    set(ladybird_helper_install_dir ${ladybird_executable_install_dir})
 else()
     set(ladybird_executable_install_dir ${CMAKE_INSTALL_BINDIR})
     set(ladybird_helper_install_dir ${CMAKE_INSTALL_LIBEXECDIR})

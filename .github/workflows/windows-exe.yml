@@ -76,9 +76,21 @@ jobs:
         working-directory: Build
         run: cmake --install . --strip --prefix "${{ github.workspace }}/Install"
 
+      # The build links the dynamic Visual C++ runtime, so ship it next to the executables for PCs that lack it.
+      - name: Bundle the Visual C++ runtime
+        shell: pwsh
+        run: |
+          $crt = Get-ChildItem -Path "$env:VCToolsRedistDir\x64" -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1
+          if (-not $crt) { throw "Could not find the Visual C++ runtime DLLs under $env:VCToolsRedistDir" }
+          Copy-Item "$($crt.FullName)\*.dll" Install\bin\
+
       - name: Package
         shell: pwsh
         run: |
+          # Every helper process must sit next to Ladybird.exe, which is the only place it looks for them.
+          foreach ($helper in 'WebContent', 'RequestServer', 'ImageDecoder', 'Compositor') {
+            if (-not (Test-Path "Install\bin\$helper.exe")) { throw "$helper.exe is not next to Ladybird.exe" }
+          }
           if (-not (Get-ChildItem -Recurse Install -Filter *.exe)) { throw "The build produced no .exe files" }
           Compress-Archive -Path Install\* -DestinationPath Ladybird-windows-x64.zip
 
