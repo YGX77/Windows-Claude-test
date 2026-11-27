@@ -1,0 +1,54 @@
+name: Windows installer
+
+# Turns the Ladybird-windows-x64.zip attached to a GitHub Release into a one-file Setup.exe installer and attaches that
+# to the same release. Run it by hand after the "Windows build" workflow has published a release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag whose zip to turn into an installer'
+        required: true
+        default: 'v0.1.1'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    name: Build Setup.exe
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NSIS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nsis unzip
+
+      - name: Download the release zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.tag }}" --repo "${{ github.repository }}" --pattern Ladybird-windows-x64.zip
+          mkdir stage
+          unzip -q Ladybird-windows-x64.zip -d stage
+          test -f stage/bin/Ladybird.exe
+          test -f stage/bin/WebContent.exe
+          test -d stage/share/Lagom
+
+      - name: Build the installer
+        run: |
+          makensis -V2 \
+            "-DSTAGE=${GITHUB_WORKSPACE}/stage" \
+            "-DOUTFILE=${GITHUB_WORKSPACE}/Ladybird-Setup.exe" \
+            "-DVERSION=${{ inputs.tag }}" \
+            .github/windows/ladybird-installer.nsi
+          ls -l Ladybird-Setup.exe
+
+      - name: Attach the installer to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" Ladybird-Setup.exe --repo "${{ github.repository }}" --clobber
