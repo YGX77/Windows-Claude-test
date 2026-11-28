@@ -434,6 +434,9 @@ interface Internals {
     // What presented the last frame of the document's navigable: "commit" for a frame a rendering update committed,
     // "clock" for a tick of the document's clock lane, or "none" before the first frame.
     DOMString lastFramePresentedBy(Document document);
+    // The scroll positions that the window of the display list the compositor holds for the document's navigable was
+    // placed at: one "(x, y)" in CSS pixels per scroller that was scrolled, separated by spaces.
+    DOMString displayListWindowScrollPositions(Document document);
     // Whether the last frame of the page handed the compositor the keyboard scroll state the page holds now.
     boolean lastFrameKeyboardScrollStateIsCurrent();
     undefined releaseHeldFrame();
@@ -462,6 +465,11 @@ interface Internals {
     // What the document's style engine holds on the heap, by owner, with the C++ style state its elements hold:
     // { owners: { name: bytes }, elements, styledElements }.
     object styleMemoryReport();
+
+    // What the document's layout holds on the heap: `owners` maps each owner to its bytes, beside `slots` (the rows the
+    // layout node arena has room for), `liveRows` (those of them that hold a box or a text node) and `layoutNodes`
+    // (the rows a C++ layout node was made for).
+    object layoutMemoryReport();
     // What the style engines of the document and the documents in its frames hold on the heap, each allocation counted
     // once however many of them share it.
     unsigned long long styleMemoryOfFrames();

@@ -130,9 +130,13 @@ sk_sp<SkImageFilter> Canvas2DCommandPlayer::image_filter_from(Canvas2DCompositin
 {
     if (!compositing.has_filter)
         return nullptr;
-    return Gfx::to_skia_image_filter(inline_data(compositing.filter), [](u64) -> Gfx::DecodedImageFrame const& {
-        // A canvas filter comes from CSS filter functions, which draw no images.
-        VERIFY_NOT_REACHED();
+    return Gfx::to_skia_image_filter(inline_data(compositing.filter), [&](u64 id) -> Gfx::DecodedImageFrame const& {
+        if (auto const* frame = m_resolvers.image_frame(id))
+            return *frame;
+        // NB: WebContent hands over every frame a filter draws with the commands, so a frame that isn't there came from
+        //     a misbehaving WebContent, and is drawn as nothing rather than taking the compositor down.
+        static auto const transparent_frame = MUST(Gfx::DecodedImageFrame::create(*MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { 1, 1 }))));
+        return transparent_frame;
     });
 }
 
@@ -149,6 +153,12 @@ Optional<SkPaint> Canvas2DCommandPlayer::paint_from(Canvas2DPaint const& style, 
     auto set_shader_with_color_stops = [&](auto make_shader) {
         auto stop_colors = inline_objects<Gfx::Color>(inline_data(style.color_stops.colors));
         auto positions = inline_objects<float>(inline_data(style.color_stops.positions));
+        // https://html.spec.whatwg.org/multipage/canvas.html#gradients
+        // When there are no stops, the gradient is transparent black.
+        if (stop_colors.is_empty()) {
+            paint.setColor(SK_ColorTRANSPARENT);
+            return;
+        }
         Vector<SkColor4f> colors;
         colors.ensure_capacity(stop_colors.size());
         for (auto const& color : stop_colors)
@@ -239,30 +249,115 @@ static bool affects_pixels_not_covered_by_source(Gfx::CompositingAndBlendingOper
         Gfx::CompositingAndBlendingOperator::DestinationATop);
 }
 
+// What a draw tells draw_with_compositing about the shape that its callback paints.
+struct DrawnShape {
+    // The bounds of the shape before the paint strokes or filters it, in the coordinates of the current transformation
+    // matrix.
+    Optional<SkRect> bounds;
+    // The fill or the stroke of one path reaches each pixel one time only. Glyphs can overlap, and an image has an
+    // alpha of its own in each pixel.
+    bool is_one_path { false };
+};
+
+// The rect of the output bitmap that holds all that a draw paints, if it is known.
+static Optional<SkRect> bitmap_rect_of_draw(SkMatrix const& matrix, SkPaint const& paint, DrawnShape const& shape)
+{
+    // FIXME: Find the rect of a draw that has a filter.
+    if (!shape.bounds.has_value() || paint.getImageFilter() || !paint.canComputeFastBounds())
+        return {};
+    SkRect storage;
+    auto rect = matrix.mapRect(paint.computeFastBounds(*shape.bounds, &storage));
+    if (!rect.isFinite())
+        return {};
+    // NB: Antialiasing can reach into the pixels around the shape.
+    rect.outset(1, 1);
+    return rect;
+}
+
+// A shadow without blur of one path in one color is the same path in the color of the shadow, moved by the offset of
+// the shadow.
+static bool shadow_is_moved_path(Canvas2DCompositing const& compositing, SkPaint const& paint, DrawnShape const& shape)
+{
+    auto const& shadow = compositing.shadow;
+    // NB: With an offset of whole pixels, the path drawn at the offset has the same edges as a layer moved by the
+    //     offset. With an operator other than source-over, a pixel that the path covers partly can blend differently
+    //     from the same pixel of a layer.
+    return shape.is_one_path
+        && shadow.blur == 0
+        && shadow.offset_x == AK::round(shadow.offset_x)
+        && shadow.offset_y == AK::round(shadow.offset_y)
+        && first_is_one_of(compositing.compositing_and_blending_operator, Gfx::CompositingAndBlendingOperator::Normal, Gfx::CompositingAndBlendingOperator::SourceOver)
+        && !paint.getShader()
+        && !paint.getImageFilter();
+}
+
 // https://html.spec.whatwg.org/multipage/canvas.html#drawing-model
 template<typename Callback>
-static void draw_with_compositing(SkCanvas& canvas, SkPaint& paint, Canvas2DCompositing const& compositing, Callback draw)
+static void draw_with_compositing(SkCanvas& canvas, SkPaint& paint, Canvas2DCompositing const& compositing, DrawnShape const& shape, Callback draw)
 {
     auto compositing_and_blending_operator = compositing.compositing_and_blending_operator;
+    auto draw_filtered = [&](SkCanvas& target, SkPaint const& source_paint) {
+        if (!compositing.filter_in_bitmap_space || !source_paint.getImageFilter()) {
+            draw(target, source_paint);
+            return;
+        }
+
+        // https://html.spec.whatwg.org/multipage/canvas.html#filters
+        // Filter coordinates are not affected by the current transformation matrix.
+        auto matrix = target.getTotalMatrix();
+        target.save();
+        target.resetMatrix();
+        SkPaint layer_paint;
+        layer_paint.setImageFilter(source_paint.refImageFilter());
+        layer_paint.setBlender(source_paint.refBlender());
+        target.saveLayer(nullptr, &layer_paint);
+        target.setMatrix(matrix);
+        auto unfiltered_paint = source_paint;
+        unfiltered_paint.setImageFilter(nullptr);
+        unfiltered_paint.setBlender(nullptr);
+        draw(target, unfiltered_paint);
+        target.restore();
+        target.restore();
+    };
 
     // 5. When shadows are drawn, render the shadow from image B, using the current shadow styles, creating image C.
     // 6. When shadows are drawn, composite C within the clipping region over the current output bitmap using the
     //    current compositing and blending operator.
-    // NB: The current transformation matrix does not affect the offset and the blur of a shadow, so the source is
-    //     drawn into a layer whose filter makes the shadow in the coordinates of the canvas. The paint carries the
-    //     global alpha and the filter of the context, so the layer holds image B.
-    if (compositing.has_shadow) {
+    if (compositing.has_shadow && shadow_is_moved_path(compositing, paint, shape)) {
+        // NB: The current transformation matrix does not affect the offset of a shadow, so the offset is applied
+        //     after the matrix. The shadow takes the alpha of image B, which is the alpha of the paint.
+        auto const& shadow = compositing.shadow;
+        auto shadow_matrix = canvas.getTotalMatrix();
+        shadow_matrix.postTranslate(shadow.offset_x, shadow.offset_y);
+        auto shadow_paint = paint;
+        shadow_paint.setColor(Gfx::to_skia_color4f(shadow.color), canvas.imageInfo().colorSpace());
+        shadow_paint.setAlphaf(shadow_paint.getAlphaf() * paint.getAlphaf());
+        canvas.save();
+        canvas.setMatrix(shadow_matrix);
+        draw(canvas, shadow_paint);
+        canvas.restore();
+    } else if (compositing.has_shadow) {
+        // NB: The current transformation matrix does not affect the offset and the blur of a shadow, so the source is
+        //     drawn into a layer whose filter makes the shadow in the coordinates of the canvas. The paint carries the
+        //     global alpha and the filter of the context, so the layer holds image B.
         auto const& shadow = compositing.shadow;
         auto matrix = canvas.getTotalMatrix();
+        // NB: A layer without bounds is as large as the clipping region, which makes each draw that casts a shadow
+        //     cost as much as a draw that fills the canvas. The layer only has to hold image B, and Skia maps the
+        //     bounds of the layer through the filter to find where the shadow lands. An operator that also affects
+        //     the pixels that the shadow does not cover needs the layer to span the clipping region.
+        Optional<SkRect> layer_bounds;
+        if (!affects_pixels_not_covered_by_source(compositing_and_blending_operator))
+            layer_bounds = bitmap_rect_of_draw(matrix, paint, shape);
         canvas.save();
         canvas.resetMatrix();
         auto sigma = shadow.blur / 2;
         SkPaint shadow_layer_paint;
         shadow_layer_paint.setImageFilter(SkImageFilters::DropShadowOnly(shadow.offset_x, shadow.offset_y, sigma, sigma, Gfx::to_skia_color4f(shadow.color), sk_ref_sp(canvas.imageInfo().colorSpace()), nullptr));
         shadow_layer_paint.setBlender(Gfx::to_skia_blender(compositing_and_blending_operator));
-        canvas.saveLayer(nullptr, &shadow_layer_paint);
+        canvas.saveLayer(layer_bounds.has_value() ? &layer_bounds.value() : nullptr, &shadow_layer_paint);
         canvas.setMatrix(matrix);
-        draw(canvas, paint);
+        draw_filtered(canvas, paint);
         canvas.restore();
         canvas.restore();
     }
@@ -274,14 +369,14 @@ static void draw_with_compositing(SkCanvas& canvas, SkPaint& paint, Canvas2DComp
     //     inside the clip.
     if (!affects_pixels_not_covered_by_source(compositing_and_blending_operator)) {
         paint.setBlender(Gfx::to_skia_blender(compositing_and_blending_operator));
-        draw(canvas, paint);
+        draw_filtered(canvas, paint);
         return;
     }
 
     SkPaint layer_paint;
     layer_paint.setBlender(Gfx::to_skia_blender(compositing_and_blending_operator));
     canvas.saveLayer(nullptr, &layer_paint);
-    draw(canvas, paint);
+    draw_filtered(canvas, paint);
     canvas.restore();
 }
 
@@ -355,7 +450,7 @@ void Canvas2DCommandPlayer::play_command(Canvas2DFillPath const& command)
     if (!paint.has_value())
         return;
     paint->setAntiAlias(true);
-    draw_with_compositing(m_surface->canvas(), *paint, command.compositing, [&](SkCanvas& canvas, SkPaint const& paint) {
+    draw_with_compositing(m_surface->canvas(), *paint, command.compositing, { .bounds = path.getBounds(), .is_one_path = true }, [&](SkCanvas& canvas, SkPaint const& paint) {
         canvas.drawPath(path, paint);
     });
 }
@@ -378,7 +473,7 @@ void Canvas2DCommandPlayer::play_command(Canvas2DStrokePath const& command)
     paint->setStrokeJoin(Gfx::to_skia_join(command.join_style));
     paint->setStrokeMiter(command.miter_limit);
     paint->setPathEffect(SkDashPathEffect::Make({ dash_array.data(), dash_array.size() }, command.dash_offset));
-    draw_with_compositing(m_surface->canvas(), *paint, command.compositing, [&](SkCanvas& canvas, SkPaint const& paint) {
+    draw_with_compositing(m_surface->canvas(), *paint, command.compositing, { .bounds = path.getBounds(), .is_one_path = true }, [&](SkCanvas& canvas, SkPaint const& paint) {
         canvas.drawPath(path, paint);
     });
 }
@@ -434,10 +529,24 @@ void Canvas2DCommandPlayer::play_command(Canvas2DDrawGlyphRuns const& command)
         skia_runs.unchecked_append(move(skia_run));
     }
 
+    // NB: Only the layer of a shadow uses the bounds of the glyphs.
+    Optional<SkRect> glyph_bounds;
+    if (command.compositing.has_shadow) {
+        auto bounds = SkRect::MakeEmpty();
+        Vector<SkRect, 32> bounds_of_glyphs;
+        for (auto const& run : skia_runs) {
+            bounds_of_glyphs.resize(run.glyph_ids.size());
+            run.font.getBounds({ run.glyph_ids.data(), run.glyph_ids.size() }, { bounds_of_glyphs.data(), bounds_of_glyphs.size() }, nullptr);
+            for (size_t i = 0; i < bounds_of_glyphs.size(); ++i)
+                bounds.join(bounds_of_glyphs[i].makeOffset(run.glyph_positions[i]));
+        }
+        glyph_bounds = bounds.makeOffset(Gfx::to_skia_point(command.translation));
+    }
+
     // NB: Not drawTextBlob(). Skia caches a drawn SkTextBlob once per subpixel origin, and finds a cached entry by
     //     scanning every entry of that blob. Canvas text is often redrawn at moving fractional positions, which
     //     piles up thousands of entries per blob and makes each draw scan all of them.
-    draw_with_compositing(m_surface->canvas(), *paint, command.compositing, [&](SkCanvas& canvas, SkPaint const& paint) {
+    draw_with_compositing(m_surface->canvas(), *paint, command.compositing, { .bounds = glyph_bounds }, [&](SkCanvas& canvas, SkPaint const& paint) {
         auto draw_runs = [&](SkPaint const& run_paint) {
             for (auto const& run : skia_runs)
                 canvas.drawGlyphs({ run.glyph_ids.data(), run.glyph_ids.size() }, { run.glyph_positions.data(), run.glyph_positions.size() }, Gfx::to_skia_point(command.translation), run.font, run_paint);
@@ -521,7 +630,7 @@ void Canvas2DCommandPlayer::draw_image(SkImage const& image, Gfx::FloatRect cons
     paint.setImageFilter(image_filter_from(compositing));
     paint.setAlpha(static_cast<u8>(compositing.global_alpha * 255));
 
-    draw_with_compositing(m_surface->canvas(), paint, compositing, [&](SkCanvas& canvas, SkPaint const& paint) {
+    draw_with_compositing(m_surface->canvas(), paint, compositing, { .bounds = Gfx::to_skia_rect(dst_rect) }, [&](SkCanvas& canvas, SkPaint const& paint) {
         canvas.drawImageRect(
             &image,
             Gfx::to_skia_rect(src_rect),

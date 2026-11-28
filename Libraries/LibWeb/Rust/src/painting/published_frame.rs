@@ -304,32 +304,42 @@ impl HeldFrame {
     /// The frame with its scroll containers where `scrolled` says the compositor scrolled them to, by the identity of
     /// their nodes, and the others where the frame had them.
     pub(crate) fn frame_where_scrolled(&self, scrolled: &[(i64, CssPixelPoint)]) -> PublishedFrame {
-        let mut scroll_own_offsets = self.paint_state.scroll_own_offsets.as_ref().clone();
-        if let Some(tree) = self.paint_state.visual_context_tree.as_deref() {
-            for node in &tree.spatial_nodes {
-                let crate::painting::visual_context::SpatialData::Scroll(scroll) = &node.data else {
-                    continue;
-                };
-                if !self.rows.paintable_row_is_populated(scroll.owner_paintable) {
-                    continue;
-                }
-                let identity = self.rows.paintable_data(scroll.owner_paintable).node_identity;
-                let Some(&(_, position)) = scrolled.iter().find(|(scroller, _)| *scroller == identity) else {
-                    continue;
-                };
-                if let Some(own_offset) = scroll_own_offsets.get_mut(scroll.state_slot) {
-                    *own_offset = CssPixelPoint::new(-position.x, -position.y);
-                }
-            }
-        }
         PublishedFrame {
             rows: self.rows.clone(),
             paint_generation: self.paint_generation,
             everything_changed_at: self.everything_changed_at,
-            paint_state: self.paint_state.with_scroll_own_offsets(Arc::new(scroll_own_offsets)),
+            paint_state: paint_state_where_scrolled(&self.rows, &self.paint_state, scrolled),
             _style_records: FrameStyleRecords::NamedByItsRows(Arc::clone(&self.style_records)),
         }
     }
+}
+
+/// `paint_state`, the paint state of a frame of `rows`, with the frame's scroll containers where `scrolled` says the
+/// compositor scrolled them to, by the identity of their nodes, and the others where the frame had them.
+fn paint_state_where_scrolled(
+    rows: &PublishedRows,
+    paint_state: &PublishedPaintState,
+    scrolled: &[(i64, CssPixelPoint)],
+) -> PublishedPaintState {
+    let mut scroll_own_offsets = paint_state.scroll_own_offsets.as_ref().clone();
+    if let Some(tree) = paint_state.visual_context_tree.as_deref() {
+        for node in &tree.spatial_nodes {
+            let crate::painting::visual_context::SpatialData::Scroll(scroll) = &node.data else {
+                continue;
+            };
+            if !rows.paintable_row_is_populated(scroll.owner_paintable) {
+                continue;
+            }
+            let identity = rows.paintable_data(scroll.owner_paintable).node_identity;
+            let Some(&(_, position)) = scrolled.iter().find(|(scroller, _)| *scroller == identity) else {
+                continue;
+            };
+            if let Some(own_offset) = scroll_own_offsets.get_mut(scroll.state_slot) {
+                *own_offset = CssPixelPoint::new(-position.x, -position.y);
+            }
+        }
+    }
+    paint_state.with_scroll_own_offsets(Arc::new(scroll_own_offsets))
 }
 
 // A frame is read on whichever thread paints it while the document writes its live columns: it
@@ -357,6 +367,12 @@ impl LayoutNodeArena {
 }
 
 impl PublishedFrame {
+    /// Moves the frame's scroll containers to where `scrolled` says the compositor scrolled them to, by the identity of
+    /// their nodes, and leaves the others where the frame had them.
+    pub(crate) fn scroll_to_where_scrolled(&mut self, scrolled: &[(i64, CssPixelPoint)]) {
+        self.paint_state = paint_state_where_scrolled(&self.rows, &self.paint_state, scrolled);
+    }
+
     /// What the frame's recording reads of the document's paint state.
     pub(crate) fn paint_state(&self) -> &PublishedPaintState {
         &self.paint_state
@@ -395,11 +411,6 @@ impl PublishedFrame {
     pub(crate) fn svg_paint_resources(&self) -> &Arc<SvgPaintResourceRows> {
         &self.rows.paint_facts.svg_paint_resources
     }
-
-    /// How many paintable rows the frame has room for.
-    pub(crate) fn paintable_row_capacity(&self) -> usize {
-        self.rows.rows.slot_capacity()
-    }
 }
 
 #[cfg(test)]
@@ -419,26 +430,32 @@ mod tests {
         let node = arena.allocate_for_test().slot;
         arena.populate_paintable_row(node);
         let mut link = fragment_tree::FragmentLink::for_test(node);
-        link.placement.insets.left = CssPixels::from_integer(10);
+        link.placement.set_insets(crate::layout::geometry::Sides {
+            left: CssPixels::from_integer(10),
+            ..Default::default()
+        });
         arena.set_committed_fragment_link(node, link.clone(), None);
         arena.paintable_rows_mut().paintable_data_mut(node).node_identity = 10;
         arena.committed_side_data_mut(node).inline_content = Some(Default::default());
 
         let published = arena.publish_rows();
-        link.placement.insets.left = CssPixels::from_integer(20);
+        link.placement.set_insets(crate::layout::geometry::Sides {
+            left: CssPixels::from_integer(20),
+            ..Default::default()
+        });
         arena.set_committed_fragment_link(node, link, None);
         arena.paintable_rows_mut().paintable_data_mut(node).node_identity = 20;
         arena.committed_side_data_mut(node).inline_content = None;
 
         assert_eq!(published.paintable_data(node).node_identity, 10);
         assert_eq!(
-            published.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets.left)),
+            published.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets().left)),
             Some(CssPixels::from_integer(10))
         );
         assert!(published.committed_side_data(node).inline_content.is_some());
         assert_eq!(arena.live_paintable_data(node).node_identity, 20);
         assert_eq!(
-            arena.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets.left)),
+            arena.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets().left)),
             Some(CssPixels::from_integer(20))
         );
         assert!(arena.committed_side_data(node).inline_content.is_none());
@@ -472,7 +489,10 @@ mod tests {
             arena.paintable_rows_mut().paintable_data_mut(node).node_identity = index as i64;
             if index % 2 == 0 {
                 let mut link = fragment_tree::FragmentLink::for_test(node);
-                link.placement.insets.top = CssPixels::from_integer(index as i64);
+                link.placement.set_insets(crate::layout::geometry::Sides {
+                    top: CssPixels::from_integer(index as i64),
+                    ..Default::default()
+                });
                 arena.set_committed_fragment_link(node, link, None);
             }
         }
@@ -526,8 +546,8 @@ mod tests {
             }
             assert_eq!(source.paintable_data(node), arena.live_paintable_data(node));
             assert_eq!(
-                source.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets.top)),
-                arena.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets.top))
+                source.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets().top)),
+                arena.with_committed_fragment_link(node, |link| link.map(|link| link.placement.insets().top))
             );
             assert!(*source.committed_side_data(node) == *arena.committed_side_data(node));
             assert_eq!(source.paint_change_stamps(node), arena.paint_change_stamps(node));

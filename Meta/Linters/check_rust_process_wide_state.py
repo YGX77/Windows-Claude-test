@@ -30,6 +30,7 @@ import sys
 # or a stub in a test binary.
 ALLOWED = {
     "Libraries/LibGfx/Rust/src/text_layout.rs:SHAPING_CACHE": "per-thread memo of a pure function; a second copy costs memory, never an answer",
+    "AK/Rust/src/stack.rs:LOWEST_ADDRESS": "per-thread cache of the thread's stack bounds; each copy finds the same bounds, so a second copy costs only another lookup",
     "AK/Rust/src/row_block.rs:NEXT_BLOCK": "numbers the blocks, so that a block only gives the rows of its own lists; a block and its lists stay in the library that made them, so two copies never compare numbers; a block that another library reads needs the counter moved to C++",
     "AK/Rust/src/waiter_list.rs:LISTS": "only libjs_rust and libwasm_engine use it, which are in one library of a process, so they share a copy; a caller in another library needs the state moved to C++",
     "Libraries/LibCompositing/Rust/src/test_stubs.rs:NEXT": "test stub for LibGfx's C++ counters, in the cargo test binary that has no C++ side",
@@ -40,6 +41,7 @@ ALLOWED = {
     "Libraries/LibIPC/Rust/src/transport.rs:IS_SHARED_IO_THREAD": "per-thread marker of the shared IO thread of this copy of the crate, which only that copy's code reads",
     "Libraries/LibJS/Flap/src/low_ir/lowering.rs:LABELS": "per-thread scratch buffer; a second copy costs memory, never an answer",
     "Libraries/LibJS/JIT/Rust/src/asm/x86_64/sse.rs:FEATURES": "immutable CPU/OS feature cache; each copy computes the same supported instructions",
+    "Libraries/LibJS/JIT/Rust/src/codegen/tests.rs:CALL_FUNCTION": "the fake Function.prototype.call of JIT unit tests, in the cargo test binary that has no runtime",
     "Libraries/LibJS/JIT/Rust/src/codegen/tests.rs:REGION": "the fake heap region of JIT unit tests, in the cargo test binary that has no runtime",
     "Libraries/LibJS/JIT/Rust/src/lib.rs:BLOCKS": "per-thread count of the allocator of JIT unit tests, in the cargo test binary that has no runtime",
     "Libraries/LibJS/JIT/Rust/src/lib.rs:COUNTING": "per-thread switch of the allocator of JIT unit tests, in the cargo test binary that has no runtime",

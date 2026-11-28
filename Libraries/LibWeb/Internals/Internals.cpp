@@ -3207,6 +3207,14 @@ Utf16String Internals::last_frame_presented_by(DOM::Document& document)
     VERIFY_NOT_REACHED();
 }
 
+String Internals::display_list_window_scroll_positions(DOM::Document& document)
+{
+    auto* navigable = as_if<HTML::LocalNavigable>(document.navigable().ptr());
+    if (!navigable)
+        return {};
+    return navigable->presenter().display_list_window_scroll_positions_for_testing();
+}
+
 void Internals::release_held_frame()
 {
     Layout::RustFFI::render_state_release_held_recording_for_testing();
@@ -3321,6 +3329,42 @@ static u64 animation_record_bytes(DOM::Document& document)
         return TraversalDecision::Continue;
     });
     return bytes;
+}
+
+GC::Ref<JS::Object> Internals::layout_memory_report()
+{
+    auto& document = window().associated_document();
+    Layout::ForcedReadScope read { document };
+    auto& realm = HTML::relevant_realm(window());
+    auto define = [&](JS::Object& object, StringView name, u64 value) {
+        object.define_direct_property(Utf16FlyString::from_utf8(name), JS::Value(static_cast<double>(value)), JS::default_attributes);
+    };
+
+    Vector<u64> bytes;
+    for (size_t index = 0;; ++index) {
+        size_t name_length = 0;
+        if (!Layout::RustFFI::layout_memory_owner_name(index, &name_length))
+            break;
+        bytes.append(0);
+    }
+    u64 slots = 0;
+    u64 live_rows = 0;
+    u64 layout_nodes = 0;
+    auto count = Layout::RustFFI::layout_memory_report(document.layout_node_arena().host(), read, bytes.span(), &slots, &live_rows, &layout_nodes);
+    VERIFY(count == bytes.size());
+
+    auto owners = JS::Object::create(realm, nullptr);
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        size_t name_length = 0;
+        auto const* name = Layout::RustFFI::layout_memory_owner_name(index, &name_length);
+        define(*owners, StringView { name, name_length }, bytes[index]);
+    }
+    auto object = JS::Object::create(realm, nullptr);
+    object->define_direct_property("owners"_utf16_fly_string, owners, JS::default_attributes);
+    define(*object, "slots"sv, slots);
+    define(*object, "liveRows"sv, live_rows);
+    define(*object, "layoutNodes"sv, layout_nodes);
+    return object;
 }
 
 GC::Ref<JS::Object> Internals::style_memory_report()
