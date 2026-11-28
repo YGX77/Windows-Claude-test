@@ -1,7 +1,7 @@
 ; Builds the per-user Windows installer for Ladybird.
 ;
 ; Required defines (pass with /D on the makensis command line):
-;   STAGE   absolute path of the folder that holds the release's bin\ and share\ folders
+;   STAGE   absolute path of the folder that holds the release's bin\ and share\ folders, LICENSE and NOTICE.txt
 ;   OUTFILE absolute path of the installer to write
 ;   VERSION version text shown in Windows' installed-apps list (optional)
 
@@ -48,6 +48,11 @@ Section "Ladybird" SecMain
   SetOutPath "$INSTDIR\share"
   File /r "${STAGE}\share\*.*"
 
+  ; BSD license terms: the license text must come with the binaries.
+  SetOutPath "$INSTDIR"
+  File "${STAGE}\LICENSE"
+  File "${STAGE}\NOTICE.txt"
+
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   SetOutPath "$INSTDIR\bin"
@@ -75,6 +80,8 @@ Section "Uninstall"
   ; Remove only what the installer put there, never the whole chosen folder.
   RMDir /r "$INSTDIR\bin"
   RMDir /r "$INSTDIR\share"
+  Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIR\NOTICE.txt"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
 

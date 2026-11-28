@@ -1,13 +1,19 @@
 name: Windows installer
 
-# Turns the Ladybird-windows-x64.zip attached to a GitHub Release into a one-file Setup.exe installer and attaches that
-# to the same release. Run it by hand after the "Windows build" workflow has published a release.
+# Takes the Ladybird-windows-x64.zip attached to a GitHub Release, adds the license files to it, builds a one-file
+# Setup.exe installer from it, and attaches both to the same release along with its description. Run it by hand
+# after the "Windows build" workflow has published a release.
 
 on:
   # A push that changes this file also runs it, which is how GitHub first discovers a workflow on a non-default branch.
   push:
     branches: ['claude/**']
-    paths: ['.github/workflows/windows-installer.yml', '.github/windows/ladybird-installer.nsi']
+    paths:
+      - '.github/workflows/windows-installer.yml'
+      - '.github/windows/ladybird-installer.nsi'
+      - '.github/windows/NOTICE.txt'
+      - '.github/windows/release-notes.md'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       tag:
@@ -43,6 +49,13 @@ jobs:
           test -f stage/bin/WebContent.exe
           test -d stage/share/Lagom
 
+          # The BSD license requires the license text to come with the binaries.
+          cp LICENSE stage/LICENSE
+          cp .github/windows/NOTICE.txt stage/NOTICE.txt
+          rm Ladybird-windows-x64.zip
+          (cd stage && zip -q -r -9 ../Ladybird-windows-x64.zip .)
+          unzip -l Ladybird-windows-x64.zip | grep -E ' (LICENSE|NOTICE.txt)$'
+
       - name: Build the installer
         run: |
           makensis -V2 \
@@ -52,7 +65,11 @@ jobs:
             .github/windows/ladybird-installer.nsi
           ls -l Ladybird-Setup.exe
 
-      - name: Attach the installer to the release
+      - name: Attach the installer and zip to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.tag || 'v0.1.2' }}" Ladybird-Setup.exe --repo "${{ github.repository }}" --clobber
+        run: |
+          gh release upload "${{ inputs.tag || 'v0.1.2' }}" Ladybird-Setup.exe Ladybird-windows-x64.zip \
+            --repo "${{ github.repository }}" --clobber
+          gh release edit "${{ inputs.tag || 'v0.1.2' }}" --repo "${{ github.repository }}" \
+            --notes-file .github/windows/release-notes.md

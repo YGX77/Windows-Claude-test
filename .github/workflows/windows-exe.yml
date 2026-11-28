@@ -177,6 +177,9 @@ jobs:
             if (-not (Test-Path "Install\bin\$helper.exe")) { throw "$helper.exe is not next to Ladybird.exe" }
           }
           if (-not (Get-ChildItem -Recurse Install -Filter *.exe)) { throw "The build produced no .exe files" }
+          # The BSD license requires the license text to come with the binaries.
+          Copy-Item LICENSE Install\LICENSE
+          Copy-Item .github\windows\NOTICE.txt Install\NOTICE.txt
           Compress-Archive -Path Install\* -DestinationPath Ladybird-windows-x64.zip
 
       - uses: actions/upload-artifact@v4

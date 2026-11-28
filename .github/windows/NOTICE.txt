@@ -1,0 +1,31 @@
+Ladybird for Windows (unofficial port)
+======================================
+
+This is an unofficial, experimental, AI-assisted ("vibe coded") Windows port of the Ladybird web browser. It is not
+made by, affiliated with, or endorsed by the Ladybird project.
+
+Source code for this build: https://github.com/YGX77/Windows-Claude-test
+Upstream Ladybird:          https://github.com/LadybirdBrowser/ladybird
+
+Ladybird itself is licensed under the 2-clause BSD license; the full text and copyright notice are in the file
+LICENSE next to this one. That license, and its copyright notice, apply to the Ladybird programs in this download.
+
+Third-party libraries
+---------------------
+
+This download also contains third-party libraries built unmodified from the vcpkg package collection
+(https://github.com/microsoft/vcpkg), among them Qt, Skia, FFmpeg, ICU, OpenSSL, curl, SDL, HarfBuzz, libwebp,
+libjpeg-turbo, SQLite and the Microsoft Visual C++ runtime. Each of them is distributed under its own license, which
+is not changed by the license of Ladybird. For example, Qt is available under the LGPL and GPL
+(https://www.qt.io/licensing), and FFmpeg under the LGPL or GPL depending on how it is built.
+
+The license and source of each library can be found in its vcpkg port, at
+https://github.com/microsoft/vcpkg/tree/master/ports/<name>, and at the home page of the library itself.
+
+The Microsoft Visual C++ runtime DLLs (vcruntime*.dll, msvcp*.dll, concrt140.dll, vccorlib140.dll) are redistributed
+under the Microsoft Visual Studio redistribution terms.
+
+No warranty
+-----------
+
+This software is provided "as is", without warranty of any kind. It is experimental and may crash or misbehave.
